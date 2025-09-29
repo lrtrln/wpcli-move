@@ -20,12 +20,7 @@ Before using WP Move CLI, ensure the following are installed and accessible in y
     ```bash
     git clone <repository_url> wp-content/mu-plugins/wp-move-cli
     ```
-2.  Navigate into the plugin directory and install the PHP dependencies using Composer.
-    ```bash
-    cd wp-content/mu-plugins/wp-move-cli
-    composer install
-    ```
-3.  Verify the installation by running `wp move`. You should see a list of available commands.
+2.  Verify the installation by running `wp move`. You should see a list of available commands.
 
 ## Configuration
 
