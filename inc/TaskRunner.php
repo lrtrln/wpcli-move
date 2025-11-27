@@ -14,6 +14,11 @@ class TaskRunner
     private $executor;
 
     /**
+     * @var string[] Cache of remote WP-CLI paths keyed by SSH target.
+     */
+    private $remote_wp_paths = [];
+
+    /**
      * @param Config $config
      * @param Executor $executor
      */
@@ -114,10 +119,16 @@ class TaskRunner
             $remote_dump_path = rtrim($remote_wp_path, '/') . '/wp-content/wpcli-move/' . $dump_filename;
             $remote_dump_dir  = dirname($remote_dump_path);
 
-            $export_cmd = sprintf(
-                "ssh %s %s 'mkdir -p %s && %s wp --path=%s db export %s --allow-root'",
-                $this->executor->ssh_options, $ssh, escapeshellarg($remote_dump_dir), $dumper_path_env, escapeshellarg($remote_wp_path), escapeshellarg($remote_dump_path)
+            $remote_wp_cmd = $this->build_remote_wp_command($conf, $ssh);
+            $remote_command = sprintf(
+                "mkdir -p %s && %s%s --path=%s db export %s --allow-root",
+                escapeshellarg($remote_dump_dir),
+                $dumper_path_env,
+                $remote_wp_cmd,
+                escapeshellarg($remote_wp_path),
+                escapeshellarg($remote_dump_path)
             );
+            $result = $this->execute_remote_command($ssh, $remote_command);
         } else {
             $dump_dir = WP_CONTENT_DIR . '/wpcli-move';
             if (!is_dir($dump_dir)) {
@@ -126,11 +137,16 @@ class TaskRunner
             $local_dump_file = $dump_dir . '/' . $dump_filename;
             $export_cmd      = sprintf(
                 "%s wp --path=%s db export %s --allow-root",
-                $dumper_path_env, escapeshellarg(ABSPATH), escapeshellarg($local_dump_file)
+                $dumper_path_env,
+                escapeshellarg(ABSPATH),
+                escapeshellarg($local_dump_file)
             );
         }
 
-        $result = $this->executor->execute($export_cmd);
+        if (!$is_remote) {
+            $result = $this->executor->execute($export_cmd);
+        }
+
         if ($result && 0 !== $result->return_code) {
             \WP_CLI::error("❌ Failed to create dump for environment '$env'. See output above for details.");
         } else {
@@ -151,17 +167,16 @@ class TaskRunner
         if ($is_remote) {
             $remote_wp_path  = $conf['wp_path'];
             $remote_dump_dir = rtrim($remote_wp_path, '/') . '/wp-content/wpcli-move';
-            // The command deletes all .sql files in the directory, without touching the directory itself.
-            $purge_cmd = sprintf(
-                "ssh %s %s 'rm -f %s/*.sql'",
-                $this->executor->ssh_options, $ssh, escapeshellarg($remote_dump_dir)
-            );
+            $purge_cmd       = sprintf("rm -f %s/*.sql", escapeshellarg($remote_dump_dir));
+            $this->execute_remote_command($ssh, $purge_cmd);
         } else {
             $dump_dir  = WP_CONTENT_DIR . '/wpcli-move';
             $purge_cmd = sprintf("rm -f %s/*.sql", escapeshellarg($dump_dir));
         }
 
-        $this->executor->execute($purge_cmd);
+        if (!$is_remote) {
+            $this->executor->execute($purge_cmd);
+        }
 
         \WP_CLI::success("✅ Dump directory for environment '$env' purged.");
     }
@@ -246,8 +261,13 @@ class TaskRunner
         $step = $is_remote ? '4' : '3';
         \WP_CLI::log("$step. Testing database connection.");
         if ($is_remote) {
-            $cmd = "ssh {$this->executor->ssh_options} $ssh 'cd {$conf['wp_path']} && wp db check --allow-root'";
-            $this->executor->execute($cmd);
+            $remote_wp_cmd = $this->build_remote_wp_command($conf, $ssh);
+            $remote_command = sprintf(
+                "cd %s && %s db check --allow-root",
+                escapeshellarg($conf['wp_path']),
+                $remote_wp_cmd
+            );
+            $this->execute_remote_command($ssh, $remote_command);
         } else {
             $db_conf = $conf['db'];
             $mysqli  = @new \mysqli($db_conf['host'] ?? 'localhost', $db_conf['user'], $db_conf['password'], $db_conf['name']);
@@ -272,7 +292,7 @@ class TaskRunner
      */
     private function rsync($path, $ssh, $remote_path, $excludes, $direction, $use_delete)
     {
-        $excludeArgs = implode(' ', array_map(fn($ex) => "--exclude={$ex}", $excludes));
+        $excludeArgs = implode(' ', array_map(fn ($ex) => "--exclude={$ex}", $excludes));
         $source      = ('pull' === $direction) ? "$ssh:" . rtrim($remote_path, '/') . '/' . $path . '/' : rtrim(ABSPATH, '/') . '/' . $path . '/';
         $destination = ('pull' === $direction) ? rtrim(ABSPATH, '/') . '/' . $path : "$ssh:" . rtrim($remote_path, '/') . '/' . $path;
 
@@ -311,56 +331,69 @@ class TaskRunner
         if (!is_dir($dump_dir)) {
             mkdir($dump_dir, 0755, true);
         }
+    
         $local_dump_file  = $dump_dir . '/local_' . date('Ymd_His') . '.sql';
-        $remote_dump_path = rtrim($remote_wp_path, '/') . '/wp-content/wpcli-move/' . basename($local_dump_file);
+        $processed_dump   = $dump_dir . '/processed_' . date('Ymd_His') . '.sql';
+        $remote_dump_path = rtrim($remote_wp_path, '/') . '/wp-content/wpcli-move/' . basename($processed_dump);
+        $remote_dump_dir  = dirname($remote_dump_path);
 
         // 1. Export DB locale
         \WP_CLI::log("Exporting local database...");
         $dumper_path_env = $this->get_dumper_path_env();
-        $result          = $this->executor->execute("{$dumper_path_env}wp --path=" . escapeshellarg(ABSPATH) . " db export {$local_dump_file} --allow-root");
+        $result = $this->executor->execute("{$dumper_path_env}wp --path=" . escapeshellarg(ABSPATH) . " db export {$local_dump_file} --allow-root");
 
-        // Check that the export was successful before continuing.
-        // In dry-run mode, the file will not exist, so we only check if it's not a dry-run.
         if (!$this->executor->is_dry_run() && (($result && 0 !== $result->return_code) || !file_exists($local_dump_file))) {
-            \WP_CLI::error("❌ Failed to export local database. Dump file could not be created at: {$local_dump_file}. See output above for details.");
+            \WP_CLI::error("❌ Failed to export local database.");
         }
 
-        $result = $this->executor->execute($mkdir_cmd);
-        if ($result && 0 !== $result->return_code) {
-            \WP_CLI::error("❌ Failed to create remote directory for dump: {$remote_dump_dir}. See output above for details.");
-        }
-
-        // 2. Transfert
-        \WP_CLI::log("Transferring dump file...");
-        $scp_cmd = "scp {$this->executor->ssh_options} " . escapeshellarg($local_dump_file) . " " . escapeshellarg("{$ssh}:{$remote_dump_path}");
-        $result  = $this->executor->execute($scp_cmd);
-        if ($result && 0 !== $result->return_code) {
-            \WP_CLI::error("❌ Failed to transfer dump file to remote server. See output above for details.");
-        }
-
-        // 3. Import et Search-Replace distant
-        \WP_CLI::log("Importing and running search-replace on remote...");
-
-        $import_cmd = sprintf(
-            "ssh %s %s 'wp --path=%s db import %s --allow-root && wp --path=%s search-replace %s %s --all-tables --skip-columns=guid --allow-root'",
-            $this->executor->ssh_options,
-            $ssh,
-            escapeshellarg($remote_wp_path),
-            escapeshellarg($remote_dump_path),
-            escapeshellarg($remote_wp_path), // The path is also needed for search-replace
-            escapeshellarg($local_conf['vhost']),
-            escapeshellarg($remote_conf['vhost'])
+        // 2. Search-replace EN LOCAL (avant le transfert)
+        \WP_CLI::log("Running search-replace locally...");
+        $result = $this->executor->execute(
+            "{$dumper_path_env}wp --path=" . escapeshellarg(ABSPATH) .
+            " search-replace " . escapeshellarg($local_conf['vhost']) .
+            " " . escapeshellarg($remote_conf['vhost']) .
+            " --export={$processed_dump} --all-tables --skip-columns=guid --allow-root"
         );
-        $result = $this->executor->execute($import_cmd);
-        if ($result && 0 !== $result->return_code) {
-            \WP_CLI::error("Failed to import database or run search-replace on remote server. See output above for details.");
+
+        if (!$this->executor->is_dry_run() && (($result && 0 !== $result->return_code) || !file_exists($processed_dump))) {
+            \WP_CLI::error("❌ Failed to run search-replace locally.");
         }
 
-        // 4. Nettoyage local
-        // 4. Local cleanup
-        // if ( ! $this->executor->is_dry_run() && file_exists( $local_dump_file ) ) {
-        //     unlink( $local_dump_file );
-        // }
+        // 3. Créer le répertoire distant
+        $mkdir_cmd = sprintf("mkdir -p %s", escapeshellarg($remote_dump_dir));
+        $result    = $this->execute_remote_command($ssh, $mkdir_cmd);
+        if ($result && 0 !== $result->return_code) {
+            \WP_CLI::error("❌ Failed to create remote directory.");
+        }
+
+        // 4. Transfert du dump DÉJÀ TRAITÉ
+        \WP_CLI::log("Transferring processed dump file...");
+        $scp_cmd = "scp {$this->executor->ssh_options} " .
+                   escapeshellarg($processed_dump) . " " .
+                   escapeshellarg("{$ssh}:{$remote_dump_path}");
+        $result = $this->executor->execute($scp_cmd);
+        if ($result && 0 !== $result->return_code) {
+            \WP_CLI::error("❌ Failed to transfer dump file.");
+        }
+
+        // 5. Import distant (simple, sans search-replace)
+        \WP_CLI::log("Importing database on remote server...");
+        $remote_wp_cmd  = $this->build_remote_wp_command($remote_conf, $ssh);
+        $remote_command = sprintf(
+            "%s --path=%s db import %s --allow-root",
+            $remote_wp_cmd,
+            escapeshellarg($remote_wp_path),
+            escapeshellarg($remote_dump_path)
+        );
+        $result         = $this->execute_remote_command($ssh, $remote_command);
+        if ($result && 0 !== $result->return_code) {
+            \WP_CLI::error("❌ Failed to import database on remote server.");
+        }
+
+        $this->ensure_remote_site_urls($ssh, $remote_wp_path, $remote_conf, $remote_wp_cmd);
+
+        // 6. Nettoyage local (optionnel)
+        \WP_CLI::success("✅ Database pushed successfully!");
     }
     /**
      * @param $ssh
@@ -381,20 +414,24 @@ class TaskRunner
         // 1. Export DB distante
         \WP_CLI::log("Exporting remote database...");
         $dumper_path_env = $this->get_dumper_path_env();
+        $remote_wp_cmd   = $this->build_remote_wp_command($remote_conf, $ssh);
 
         // Assurer que le répertoire distant existe avant l'exportation
         $remote_dump_dir = dirname($remote_dump_path);
-        $mkdir_cmd       = sprintf(
-            "ssh %s %s 'mkdir -p %s'",
-            $this->executor->ssh_options, $ssh, escapeshellarg($remote_dump_dir)
-        );
-        $result = $this->executor->execute($mkdir_cmd);
+        $mkdir_cmd       = sprintf("mkdir -p %s", escapeshellarg($remote_dump_dir));
+        $result          = $this->execute_remote_command($ssh, $mkdir_cmd);
         if ($result && 0 !== $result->return_code) {
             \WP_CLI::error("❌ Failed to create remote directory for dump: {$remote_dump_dir}. See output above for details.");
         }
 
-        $export_cmd = "ssh {$this->executor->ssh_options} {$ssh} '{$dumper_path_env}wp --path=" . escapeshellarg($remote_wp_path) . " db export " . escapeshellarg($remote_dump_path) . " --allow-root'";
-        $result     = $this->executor->execute($export_cmd);
+        $remote_command = sprintf(
+            "%s%s --path=%s db export %s --allow-root",
+            $dumper_path_env,
+            $remote_wp_cmd,
+            escapeshellarg($remote_wp_path),
+            escapeshellarg($remote_dump_path)
+        );
+        $result = $this->execute_remote_command($ssh, $remote_command);
         if ($result && 0 !== $result->return_code) {
             \WP_CLI::error("❌ Failed to export remote database. See output above for details.");
         }
@@ -412,7 +449,11 @@ class TaskRunner
         $dumper_path_env = $this->get_dumper_path_env(); // Re-get for local
         $import_cmd      = sprintf(
             "{$dumper_path_env}wp --path=%s db import %s --allow-root && {$dumper_path_env}wp --path=%s search-replace %s %s --all-tables --skip-columns=guid --allow-root",
-            escapeshellarg(ABSPATH), escapeshellarg($local_dump_file), escapeshellarg(ABSPATH), escapeshellarg($remote_conf['vhost']), escapeshellarg($local_conf['vhost'])
+            escapeshellarg(ABSPATH),
+            escapeshellarg($local_dump_file),
+            escapeshellarg(ABSPATH),
+            escapeshellarg($remote_conf['vhost']),
+            escapeshellarg($local_conf['vhost'])
         );
         $result = $this->executor->execute($import_cmd);
         if ($result && 0 !== $result->return_code) {
@@ -469,5 +510,113 @@ class TaskRunner
         // 3. If nothing is found, return empty string and let WP-CLI handle it.
 
         return '';
+    }
+
+    /**
+     * Builds the remote WP-CLI invocation, optionally prefixing it with a dedicated PHP binary
+     * and bypassing the system wrapper when a phar path is supplied.
+     *
+     * @param array $env_conf
+     * @param string $ssh
+     * @return string
+     */
+    private function build_remote_wp_command(array $env_conf, $ssh)
+    {
+        if (!empty($env_conf['wp_cli_path'])) {
+            $php_cli = $env_conf['php_cli'] ?? 'php';
+
+            return sprintf(
+                "%s %s",
+                escapeshellarg($php_cli),
+                escapeshellarg($env_conf['wp_cli_path'])
+            );
+        }
+
+        $wp_path = $this->get_remote_wp_path($ssh);
+        $php_cli = $env_conf['php_cli'] ?? '';
+
+        if ($php_cli) {
+            return sprintf("%s %s", escapeshellarg($php_cli), escapeshellarg($wp_path));
+        }
+
+        return escapeshellarg($wp_path);
+    }
+
+    /**
+     * Determines the path to the remote `wp` binary and caches the result.
+     *
+     * @param string $ssh
+     * @return string
+     */
+    private function get_remote_wp_path($ssh)
+    {
+        if (!$ssh) {
+            \WP_CLI::error("❌ SSH target is required to run remote WP-CLI commands.");
+        }
+
+        if (isset($this->remote_wp_paths[$ssh])) {
+            return $this->remote_wp_paths[$ssh];
+        }
+
+        $result = $this->execute_remote_command($ssh, 'command -v wp', true);
+        if (!$result || 0 !== $result->return_code || '' === trim($result->stdout)) {
+            \WP_CLI::error("❌ Unable to locate WP-CLI on remote host '{$ssh}'. Please ensure `wp` is installed and in PATH.");
+        }
+
+        return $this->remote_wp_paths[$ssh] = trim($result->stdout);
+    }
+
+    /**
+     * Executes a remote shell command via SSH with proper escaping.
+     *
+     * @param string $ssh
+     * @param string $remote_command
+     * @param bool $capture_stdout
+     * @return \WP_CLI\ProcessRun|null
+     */
+    private function execute_remote_command($ssh, $remote_command, $capture_stdout = false)
+    {
+        $ssh_cmd = sprintf(
+            "ssh %s %s %s",
+            $this->executor->ssh_options,
+            escapeshellarg($ssh),
+            escapeshellarg($remote_command)
+        );
+
+        return $this->executor->execute($ssh_cmd, $capture_stdout);
+    }
+
+    /**
+     * Forces the remote siteurl/home options to match the configured vhost.
+     *
+     * @param string $ssh
+     * @param string $remote_wp_path
+     * @param array $remote_conf
+     * @param string $remote_wp_cmd
+     */
+    private function ensure_remote_site_urls($ssh, $remote_wp_path, array $remote_conf, $remote_wp_cmd)
+    {
+        $remote_vhost = $remote_conf['vhost'] ?? '';
+        if (!$remote_vhost) {
+            return;
+        }
+
+        \WP_CLI::log("Fixing remote siteurl/home to {$remote_vhost}...");
+
+        $escaped_wp_path = escapeshellarg($remote_wp_path);
+        $escaped_vhost   = escapeshellarg($remote_vhost);
+        $command         = sprintf(
+            "%s --path=%s option update home %s --allow-root && %s --path=%s option update siteurl %s --allow-root",
+            $remote_wp_cmd,
+            $escaped_wp_path,
+            $escaped_vhost,
+            $remote_wp_cmd,
+            $escaped_wp_path,
+            $escaped_vhost
+        );
+        $result = $this->execute_remote_command($ssh, $command);
+        if ($result && 0 !== $result->return_code) {
+            \WP_CLI::warning("⚠️ Échec de la mise à jour de la home/siteurl distante ({$remote_vhost}).");
+        }
     }
 }
