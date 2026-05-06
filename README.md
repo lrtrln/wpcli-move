@@ -40,7 +40,7 @@ local:
 
 production:
   vhost: "https://www.my-project.com"
-  wp_path: "/home/user/public_html"
+  wordpress_path: "/home/user/public_html"
   ssh: "user@your-server.com"
   # Folders NOT allowed to be pushed to this environment.
   # By default, 'themes', 'plugins', and 'uploads' are pushable.
@@ -59,6 +59,10 @@ production:
 ```
 
 ## Available Commands
+
+Path keys:
+- `wp_path` remains the canonical key for the absolute WordPress path.
+- `wordpress_path` is also accepted as an alias and is normalized internally to `wp_path`.
 
 ### `wp move push <environment>`
 Pushes files and/or the database from your local environment to a remote one.

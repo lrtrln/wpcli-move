@@ -43,7 +43,17 @@ class Config
             \WP_CLI::error("Environment '$env' is not defined in move.yml.");
         }
 
-        return $this->config[$env];
+        $config = $this->config[$env];
+
+        if (!isset($config['wp_path']) && isset($config['wordpress_path'])) {
+            $config['wp_path'] = $config['wordpress_path'];
+        }
+
+        if (!isset($config['wp_path'])) {
+            \WP_CLI::error("Environment '$env' must define either 'wp_path' or 'wordpress_path' in move.yml.");
+        }
+
+        return $config;
     }
 
     /**
@@ -51,6 +61,6 @@ class Config
      */
     public function get_local_config()
     {
-        return $this->config['local'];
+        return $this->get_env_config('local');
     }
 }
