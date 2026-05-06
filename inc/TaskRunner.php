@@ -232,22 +232,40 @@ class TaskRunner
         $step = $is_remote ? '3' : '2';
         \WP_CLI::log("$step. Testing WordPress path: $path");
         if ($is_remote) {
-            $cmd    = "ssh {$this->executor->ssh_options} $ssh 'cd \"$path\" && [ -f \"wp-settings.php\" ] && echo 1 || echo 0'";
+            $cmd    = "ssh {$this->executor->ssh_options} $ssh '[ -d " . escapeshellarg($path) . " ] && { [ -f " . escapeshellarg(rtrim($path, '/') . '/wp-settings.php') . " ] && echo 2 || echo 1; } || echo 0'";
             $result = $this->executor->execute($cmd, true);
-            if ($result && '1' !== trim($result->stdout)) {
-                $error_message = "❌ Remote path '$path' does not exist or is not a WordPress installation.";
+            if ($result) {
+                $status = trim($result->stdout);
+                if ('2' === $status) {
+                    \WP_CLI::success("✅ Remote path exists and is a valid WordPress installation.");
+
+                    return;
+                }
+
+                if ('1' === $status) {
+                    \WP_CLI::warning("⚠️ Remote path '$path' exists but is not a WordPress installation.");
+
+                    return;
+                }
+
+                $error_message = "❌ Remote path '$path' does not exist.";
                 if (!empty($result->stderr)) {
                     $error_message .= "" . $result->stderr;
                 }
                 \WP_CLI::error($error_message);
             }
-            \WP_CLI::success("✅ Remote path is a valid WordPress installation.");
         } else {
-            if (is_dir($path) && file_exists($path . '/wp-settings.php')) {
-                \WP_CLI::success("✅ Local path is a valid WordPress installation.");
-            } else {
-                \WP_CLI::error("❌ Local path '$path' does not exist or is not a WordPress installation.");
+            if (!is_dir($path)) {
+                \WP_CLI::error("❌ Local path '$path' does not exist.");
             }
+
+            if (file_exists($path . '/wp-settings.php')) {
+                \WP_CLI::success("✅ Local path exists and is a valid WordPress installation.");
+
+                return;
+            }
+
+            \WP_CLI::warning("⚠️ Local path '$path' exists but is not a WordPress installation.");
         }
     }
 
