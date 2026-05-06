@@ -561,7 +561,7 @@ class TaskRunner
     }
 
     /**
-     * Determines the path to the remote `wp` binary and caches the result.
+     * Determines the path to the remote WP-CLI binary and caches the result.
      *
      * @param string $ssh
      * @return string
@@ -576,9 +576,9 @@ class TaskRunner
             return $this->remote_wp_paths[$ssh];
         }
 
-        $result = $this->execute_remote_command($ssh, 'command -v wp', true);
+        $result = $this->execute_remote_command($ssh, 'command -v wp || command -v wpcli || command -v wp-cli', true);
         if (!$result || 0 !== $result->return_code || '' === trim($result->stdout)) {
-            \WP_CLI::error("❌ Unable to locate WP-CLI on remote host '{$ssh}'. Please ensure `wp` is installed and in PATH.");
+            \WP_CLI::error("❌ Unable to locate WP-CLI on remote host '{$ssh}'. Please ensure `wp`, `wpcli`, or `wp-cli` is installed and in PATH.");
         }
 
         return $this->remote_wp_paths[$ssh] = trim($result->stdout);
