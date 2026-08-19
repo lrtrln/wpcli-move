@@ -37,14 +37,20 @@ class Commands extends \WP_CLI_Command
      * [--uploads]
      * : Sync the uploads directory.
      *
+     * [--wp]
+     * : Sync native WordPress core files only (wp-admin, wp-includes and root core files).
+     *
      * [--db]
      * : Sync the database.
      *
      * [--all]
-     * : A shortcut to sync all allowed directories and the database.
+     * : Sync the whole WordPress directory and the database.
      *
      * [--delete]
      * : Deletes files on the destination that do not exist on the source. Use with caution.
+     *
+     * [--force]
+     * : Allows --wp or --all to overwrite an existing remote WordPress installation.
      *
      * [--dry-run]
      * : Show the commands that would be run, without actually running them.
@@ -67,6 +73,8 @@ class Commands extends \WP_CLI_Command
         $denied_folders = $conf['not_push'] ?? [];
 
         $sync_db         = !empty($assoc_args['db']) || !empty($assoc_args['all']);
+        $sync_wp         = !empty($assoc_args['wp']) || !empty($assoc_args['all']);
+        $sync_all_files  = !empty($assoc_args['all']);
         $folders_to_sync = [];
 
         $available_folders = [
@@ -76,11 +84,9 @@ class Commands extends \WP_CLI_Command
             'uploads' => 'wp-content/uploads',
         ];
 
-        if (isset($assoc_args['all'])) {
-            foreach ($available_folders as $key => $path) {
-                if (!in_array($key, $denied_folders, true)) {
-                    $folders_to_sync[] = $path;
-                }
+        if ($sync_all_files) {
+            if ($denied_folders) {
+                \WP_CLI::warning("⚠️ The '--all' option pushes the whole WordPress directory and ignores the 'not_push' list for the '$env' environment.");
             }
         } else {
             foreach ($available_folders as $key => $path) {
@@ -94,14 +100,14 @@ class Commands extends \WP_CLI_Command
             }
         }
 
-        if (!$sync_db && empty($folders_to_sync)) {
-            \WP_CLI::log("Nothing to push. Please specify a valid component to sync (e.g., --db, --themes) or check your 'move.yml' configuration.");
+        if (!$sync_db && !$sync_wp && empty($folders_to_sync)) {
+            \WP_CLI::log("Nothing to push. Please specify a valid component to sync (e.g., --db, --themes, --wp) or check your 'move.yml' configuration.");
 
             return;
         }
 
         \WP_CLI::log("Pushing to environment: $env" . ($this->executor->is_dry_run() ? ' (dry run)' : ''));
-        $this->task_runner->run_push($env, $folders_to_sync, $sync_db, isset($assoc_args['delete']));
+        $this->task_runner->run_push($env, $folders_to_sync, $sync_db, isset($assoc_args['delete']), $sync_wp, $sync_all_files, isset($assoc_args['force']));
 
         if ($this->executor->is_dry_run()) {
             \WP_CLI::success("✅ Dry run finished. No changes were made.");
@@ -127,14 +133,20 @@ class Commands extends \WP_CLI_Command
      * [--uploads]
      * : Sync the uploads directory.
      *
+     * [--wp]
+     * : Sync native WordPress core files only (wp-admin, wp-includes and root core files).
+     *
      * [--db]
      * : Sync the database.
      *
      * [--all]
-     * : A shortcut to sync all directories and the database.
+     * : Sync the whole WordPress directory and the database.
      *
      * [--delete]
      * : Deletes files on the destination that do not exist on the source. Use with caution.
+     *
+     * [--force]
+     * : Allows --wp or --all to overwrite an existing local WordPress installation.
      *
      * [--dry-run]
      * : Show the commands that would be run, without actually running them.
@@ -153,14 +165,12 @@ class Commands extends \WP_CLI_Command
         $env = $args[0] ?? 'staging';
         $this->init_services($assoc_args);
 
-        $sync_db         = isset($assoc_args['db']);
+        $sync_db         = !empty($assoc_args['db']) || !empty($assoc_args['all']);
+        $sync_wp         = !empty($assoc_args['wp']) || !empty($assoc_args['all']);
+        $sync_all_files  = !empty($assoc_args['all']);
         $folders_to_sync = [];
 
-        if (isset($assoc_args['all'])) {
-            $sync_db = true;
-            // For a pull, we sync the most common directories by default.
-            $folders_to_sync = ['wp-content/themes', 'wp-content/plugins', 'wp-content/mu-plugins', 'wp-content/uploads'];
-        } else {
+        if (!$sync_all_files) {
             if (isset($assoc_args['themes'])) {
                 $folders_to_sync[] = 'wp-content/themes';
             }
@@ -175,8 +185,14 @@ class Commands extends \WP_CLI_Command
             }
         }
 
+        if (!$sync_db && !$sync_wp && empty($folders_to_sync)) {
+            \WP_CLI::log("Nothing to pull. Please specify a valid component to sync (e.g., --db, --themes, --wp).");
+
+            return;
+        }
+
         \WP_CLI::log("Pulling from environment: $env" . ($this->executor->is_dry_run() ? ' (dry run)' : ''));
-        $this->task_runner->run_pull($env, $folders_to_sync, $sync_db, isset($assoc_args['delete']));
+        $this->task_runner->run_pull($env, $folders_to_sync, $sync_db, isset($assoc_args['delete']), $sync_wp, $sync_all_files, isset($assoc_args['force']));
 
         if ($this->executor->is_dry_run()) {
             \WP_CLI::success("✅ Dry run finished. No changes were made.");

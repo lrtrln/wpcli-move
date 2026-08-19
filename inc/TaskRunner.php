@@ -54,11 +54,26 @@ class TaskRunner
      * @param $folders_to_sync
      * @param $sync_db
      * @param $use_delete
+     * @param $sync_wp
+     * @param $sync_all_files
+     * @param $force
      */
-    public function run_push($env, $folders_to_sync, $sync_db, $use_delete)
+    public function run_push($env, $folders_to_sync, $sync_db, $use_delete, $sync_wp = false, $sync_all_files = false, $force = false)
     {
         $conf = $this->config->get_env_config($env);
         $ssh  = $conf['ssh'] ?? null;
+
+        if ($sync_wp || $sync_all_files) {
+            $this->guard_remote_wordpress_version($ssh, $conf, $force);
+        }
+
+        if ($sync_all_files) {
+            $this->rsync('', $ssh, $conf['wp_path'], $conf['exclude'] ?? [], 'push', $use_delete);
+        } elseif ($sync_wp) {
+            foreach ($this->get_local_wordpress_core_paths() as $path) {
+                $this->rsync($path, $ssh, $conf['wp_path'], $conf['exclude'] ?? [], 'push', $use_delete);
+            }
+        }
 
         foreach ($folders_to_sync as $folder) {
             $this->rsync($folder, $ssh, $conf['wp_path'], $conf['exclude'] ?? [], 'push', $use_delete);
@@ -74,14 +89,29 @@ class TaskRunner
      * @param $folders_to_sync
      * @param $sync_db
      * @param $use_delete
+     * @param $sync_wp
+     * @param $sync_all_files
+     * @param $force
      */
-    public function run_pull($env, $folders_to_sync, $sync_db, $use_delete)
+    public function run_pull($env, $folders_to_sync, $sync_db, $use_delete, $sync_wp = false, $sync_all_files = false, $force = false)
     {
         $remote_conf = $this->config->get_env_config($env);
         $ssh         = $remote_conf['ssh'] ?? null;
 
         if (!$ssh) {
             \WP_CLI::error("❌ The 'pull' command requires an SSH configuration for the '$env' environment.");
+        }
+
+        if ($sync_wp || $sync_all_files) {
+            $this->guard_local_wordpress_version($ssh, $remote_conf, $force);
+        }
+
+        if ($sync_all_files) {
+            $this->rsync('', $ssh, $remote_conf['wp_path'], $remote_conf['exclude'] ?? [], 'pull', $use_delete);
+        } elseif ($sync_wp) {
+            foreach ($this->get_local_wordpress_core_paths() as $path) {
+                $this->rsync($path, $ssh, $remote_conf['wp_path'], $remote_conf['exclude'] ?? [], 'pull', $use_delete);
+            }
         }
 
         foreach ($folders_to_sync as $folder) {
@@ -311,12 +341,29 @@ class TaskRunner
     private function rsync($path, $ssh, $remote_path, $excludes, $direction, $use_delete)
     {
         $excludeArgs = implode(' ', array_map(fn ($ex) => "--exclude={$ex}", $excludes));
-        $source      = ('pull' === $direction) ? "$ssh:" . rtrim($remote_path, '/') . '/' . $path . '/' : rtrim(ABSPATH, '/') . '/' . $path . '/';
-        $destination = ('pull' === $direction) ? rtrim(ABSPATH, '/') . '/' . $path : "$ssh:" . rtrim($remote_path, '/') . '/' . $path;
+        $local_base  = rtrim(ABSPATH, '/');
+        $remote_base = rtrim($remote_path, '/');
+        $path        = trim($path, '/');
+        $is_root     = '' === $path;
+        $is_dir_sync = $is_root || '' === pathinfo($path, PATHINFO_EXTENSION);
 
-        \WP_CLI::log("Sync ($direction) $path");
+        if ('pull' === $direction) {
+            $source      = "$ssh:" . $remote_base . '/' . ($is_root ? '' : $path . ($is_dir_sync ? '/' : ''));
+            $destination = $local_base . '/' . ($is_root ? '' : $path . ($is_dir_sync ? '' : ''));
+        } elseif ($is_root) {
+            $source      = $local_base . '/';
+            $destination = "$ssh:" . $remote_base . '/';
+        } elseif (is_dir($local_base . '/' . $path)) {
+            $source      = $local_base . '/' . $path . '/';
+            $destination = "$ssh:" . $remote_base . '/' . $path . '/';
+        } else {
+            $source      = $local_base . '/' . $path;
+            $destination = "$ssh:" . $remote_base . '/' . $path;
+        }
 
-        if ('pull' === $direction && !is_dir($destination)) {
+        \WP_CLI::log("Sync ($direction) " . ($is_root ? 'WordPress root' : $path));
+
+        if ('pull' === $direction && $is_dir_sync && !is_dir($destination)) {
             mkdir($destination, 0755, true);
         }
 
@@ -484,6 +531,178 @@ class TaskRunner
         // if ( ! $this->executor->is_dry_run() && file_exists( $local_dump_file ) ) {
         //     unlink( $local_dump_file );
         // }
+    }
+
+    /**
+     * Prevents pushing local core files over a newer remote WordPress installation.
+     *
+     * @param string|null $ssh
+     * @param array $remote_conf
+     * @param bool $force
+     */
+    private function guard_remote_wordpress_version($ssh, array $remote_conf, $force)
+    {
+        if (!$ssh) {
+            \WP_CLI::error("❌ The '--wp' and '--all' push modes require an SSH configuration for the remote environment.");
+        }
+
+        if ($this->executor->is_dry_run()) {
+            \WP_CLI::log("Skipping remote WordPress version guard in dry-run mode.");
+
+            return;
+        }
+
+        $remote_wp_path = $remote_conf['wp_path'];
+        $settings_file  = rtrim($remote_wp_path, '/') . '/wp-settings.php';
+        $result         = $this->execute_remote_command(
+            $ssh,
+            sprintf("[ -f %s ] && echo 1 || echo 0", escapeshellarg($settings_file)),
+            true
+        );
+
+        if (!$result || 0 !== $result->return_code) {
+            \WP_CLI::error("❌ Unable to inspect the remote WordPress installation before pushing.");
+        }
+
+        if ('1' !== trim($result->stdout)) {
+            return;
+        }
+
+        $local_version  = $this->get_local_wordpress_version();
+        $remote_version = $this->get_remote_wordpress_version($ssh, $remote_conf);
+
+        if ($local_version && $remote_version && version_compare($remote_version, $local_version, '>')) {
+            \WP_CLI::error("❌ Remote WordPress is newer ({$remote_version}) than local WordPress ({$local_version}). Push aborted.");
+        }
+
+        if (!$force) {
+            $versions = ($local_version && $remote_version) ? " Remote: {$remote_version}, local: {$local_version}." : '';
+            \WP_CLI::error("❌ A WordPress installation already exists on the remote path '{$remote_wp_path}'.{$versions} Add --force to overwrite it.");
+        }
+
+        if (!$local_version || !$remote_version) {
+            \WP_CLI::warning("⚠️ Unable to compare WordPress versions. Continuing because --force was provided.");
+
+            return;
+        }
+
+        \WP_CLI::warning("⚠️ Remote WordPress exists. Continuing with --force: local {$local_version}, remote {$remote_version}.");
+    }
+
+    /**
+     * Prevents pulling remote core files over a newer local WordPress installation.
+     *
+     * @param string $ssh
+     * @param array $remote_conf
+     * @param bool $force
+     */
+    private function guard_local_wordpress_version($ssh, array $remote_conf, $force)
+    {
+        if ($this->executor->is_dry_run()) {
+            \WP_CLI::log("Skipping local WordPress version guard in dry-run mode.");
+
+            return;
+        }
+
+        if (!file_exists(rtrim(ABSPATH, '/') . '/wp-settings.php')) {
+            return;
+        }
+
+        $local_version  = $this->get_local_wordpress_version();
+        $remote_version = $this->get_remote_wordpress_version($ssh, $remote_conf);
+
+        if ($local_version && $remote_version && version_compare($local_version, $remote_version, '>')) {
+            \WP_CLI::error("❌ Local WordPress is newer ({$local_version}) than remote WordPress ({$remote_version}). Pull aborted.");
+        }
+
+        if (!$force) {
+            $versions = ($local_version && $remote_version) ? " Local: {$local_version}, remote: {$remote_version}." : '';
+            \WP_CLI::error("❌ A WordPress installation already exists locally at '" . ABSPATH . "'.{$versions} Add --force to overwrite it.");
+        }
+
+        if (!$local_version || !$remote_version) {
+            \WP_CLI::warning("⚠️ Unable to compare WordPress versions. Continuing because --force was provided.");
+
+            return;
+        }
+
+        \WP_CLI::warning("⚠️ Local WordPress exists. Continuing with --force: local {$local_version}, remote {$remote_version}.");
+    }
+
+    /**
+     * @return string
+     */
+    private function get_local_wordpress_version()
+    {
+        $version_file = ABSPATH . WPINC . '/version.php';
+        if (!file_exists($version_file)) {
+            return '';
+        }
+
+        $wp_version = '';
+        include $version_file;
+
+        return (string) $wp_version;
+    }
+
+    /**
+     * @param string $ssh
+     * @param array $remote_conf
+     * @return string
+     */
+    private function get_remote_wordpress_version($ssh, array $remote_conf)
+    {
+        $remote_wp_path = rtrim($remote_conf['wp_path'], '/');
+        $version_file   = $remote_wp_path . '/wp-includes/version.php';
+        $php_cli        = !empty($remote_conf['php_cli']) ? escapeshellarg($remote_conf['php_cli']) : 'php';
+        $php_code       = '$wp_version = ""; include ' . var_export($version_file, true) . '; echo $wp_version;';
+        $command        = sprintf(
+            "[ -f %s ] && %s -r %s || true",
+            escapeshellarg($version_file),
+            $php_cli,
+            escapeshellarg($php_code)
+        );
+
+        $result = $this->execute_remote_command($ssh, $command, true);
+        if (!$result || 0 !== $result->return_code) {
+            return '';
+        }
+
+        return trim($result->stdout);
+    }
+
+    /**
+     * @return string[]
+     */
+    private function get_local_wordpress_core_paths()
+    {
+        $paths = ['wp-admin', 'wp-includes'];
+        $files = [
+            'index.php',
+            'license.txt',
+            'readme.html',
+            'wp-activate.php',
+            'wp-blog-header.php',
+            'wp-comments-post.php',
+            'wp-config-sample.php',
+            'wp-cron.php',
+            'wp-links-opml.php',
+            'wp-load.php',
+            'wp-login.php',
+            'wp-mail.php',
+            'wp-settings.php',
+            'wp-signup.php',
+            'wp-trackback.php',
+            'xmlrpc.php',
+        ];
+
+        foreach ($files as $file) {
+            if (file_exists(rtrim(ABSPATH, '/') . '/' . $file)) {
+                $paths[] = $file;
+            }
+        }
+
+        return $paths;
     }
 
     /**

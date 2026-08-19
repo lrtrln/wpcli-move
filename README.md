@@ -82,9 +82,11 @@ Creates a database dump for a specific environment.
 - `--plugins`: Sync the `wp-content/plugins` directory.
 - `--mu-plugins`: Sync the `wp-content/mu-plugins` directory.
 - `--uploads`: Sync the `wp-content/uploads` directory.
+- `--wp`: Sync native WordPress core files only (`wp-admin`, `wp-includes`, and root core files; `wp-config.php` is not included).
 - `--db`: Sync the database.
-- `--all`: A shortcut to sync all configured directories and the database.
+- `--all`: Sync the whole WordPress directory and the database. On push, this ignores `not_push` because it is meant to send everything; `exclude` still applies.
 - `--delete`: Deletes files on the destination that do not exist on the source. **Use with caution.**
+- `--force`: Allows `--wp` or `--all` to overwrite an existing WordPress installation. It does not allow overwriting a newer destination WordPress version.
 - `--dry-run`: Simulates the operation and shows what changes would be made.
 - `--purge`: (Used with `dump` command) Deletes all `.sql` files in the `wp-content/wpcli-move` directory.
 
@@ -100,9 +102,19 @@ Creates a database dump for a specific environment.
 wp move push production --db --uploads
 ```
 
-**Pull the entire site from staging to local, deleting local files that don't exist on staging**
+**Push native WordPress files to production**
 ```bash
-wp move pull staging --all --delete
+wp move push production --wp --force
+```
+
+**Pull native WordPress files from staging**
+```bash
+wp move pull staging --wp --force
+```
+
+**Recover the entire site from staging to local, deleting local files that don't exist on staging**
+```bash
+wp move pull staging --all --delete --force
 ```
 
 **Test the production environment configuration without making any changes**
@@ -125,9 +137,11 @@ wp move dump production --purge
 wp move push production --all --dry-run
 ```
 
+When syncing with `--wp` or `--all`, WP Move CLI checks the destination WordPress installation first. If WordPress already exists on the destination, the sync is aborted unless `--force` is provided. If the destination installation is newer than the source, the sync is always aborted.
+
 ## Compatibility
 
-This tool is developed and tested on **Linux** and **macOS**. It should work on any POSIX-compliant system where the prerequisites are met. It is not tested on Windows, and compatibility with environments like WSL (Windows Subsystem for Linux) may vary.
+This tool is developed and tested on **Linux**. It should work on any POSIX-compliant system where the prerequisites are met. It is not tested on Windows, and compatibility with environments like WSL (Windows Subsystem for Linux) may vary.
 
 # LICENCE
 
