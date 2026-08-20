@@ -16,11 +16,13 @@ class Config
      */
     public function __construct($config_file)
     {
-        if (!file_exists($config_file)) {
-            \WP_CLI::error("Configuration file '$config_file' not found!");
-        }
-
         self::load_project_dotenv(dirname($config_file));
+
+        if (!file_exists($config_file)) {
+            $this->config = ['local' => []];
+
+            return;
+        }
 
         try {
             $this->config = $this->resolve_env_values(Yaml::parseFile($config_file));
@@ -42,16 +44,40 @@ class Config
     public function get_env_config($env)
     {
         if (!isset($this->config[$env])) {
-            \WP_CLI::error("Environment '$env' is not defined in move.yml.");
+            $config = $this->get_wp_cli_alias_env_config($env);
+            if (!$config) {
+                \WP_CLI::error("Environment '$env' is not defined in move.yml or WP-CLI aliases.");
+            }
+        } else {
+            $config = $this->normalize_env_config($env, $this->config[$env] ?? []);
         }
 
-        $config = $this->config[$env] ?? [];
+        return $config;
+    }
+
+    /**
+     * @param string $env
+     * @param mixed $config
+     * @return array
+     */
+    private function normalize_env_config($env, $config)
+    {
         if (null === $config) {
             $config = [];
         }
 
         if (!is_array($config)) {
             \WP_CLI::error("Environment '$env' must be a YAML mapping in move.yml.");
+        }
+
+        if (isset($config['alias'])) {
+            $alias_config = $this->get_wp_cli_alias_env_config($config['alias']);
+            if (!$alias_config) {
+                \WP_CLI::error("WP-CLI alias '{$config['alias']}' referenced by environment '$env' was not found or is not supported.");
+            }
+
+            unset($config['alias']);
+            $config = array_replace_recursive($alias_config, $config);
         }
 
         if (!isset($config['wp_path']) && isset($config['wordpress_path'])) {
@@ -67,6 +93,84 @@ class Config
         }
 
         return $config;
+    }
+
+    /**
+     * @param string $env
+     * @return array|null
+     */
+    private function get_wp_cli_alias_env_config($env)
+    {
+        if (!class_exists('\WP_CLI') || !method_exists('\WP_CLI', 'get_runner')) {
+            return null;
+        }
+
+        $alias = 0 === strpos($env, '@') ? $env : '@' . $env;
+        $alias_key = ltrim($alias, '@');
+        $aliases = \WP_CLI::get_runner()->aliases ?? [];
+        if (isset($aliases[$alias])) {
+            $alias_config = $aliases[$alias];
+        } elseif (isset($aliases[$alias_key])) {
+            $alias_config = $aliases[$alias_key];
+        } else {
+            return null;
+        }
+
+        if (!is_array($alias_config)) {
+            return null;
+        }
+
+        if (array_is_list($alias_config)) {
+            \WP_CLI::error("WP-CLI alias '$alias' is a group alias. WP Move CLI requires an alias targeting one WordPress install.");
+        }
+
+        $config = [];
+
+        if (!empty($alias_config['url'])) {
+            $config['vhost'] = $alias_config['url'];
+        }
+
+        if (!empty($alias_config['path'])) {
+            $config['wp_path'] = $alias_config['path'];
+        }
+
+        if (!empty($alias_config['ssh'])) {
+            [$ssh, $path] = $this->split_wp_cli_alias_ssh($alias_config['ssh']);
+            $config['ssh'] = $ssh;
+            if (empty($config['wp_path']) && $path) {
+                $config['wp_path'] = $path;
+            }
+        }
+
+        if (empty($config['ssh']) && 0 !== strpos($alias, '@local')) {
+            return null;
+        }
+
+        return $config;
+    }
+
+    /**
+     * @param string $ssh
+     * @return string[]
+     */
+    private function split_wp_cli_alias_ssh($ssh)
+    {
+        $path_pos = false;
+        foreach (['/', '~'] as $marker) {
+            $pos = strpos($ssh, $marker);
+            if (false !== $pos && (false === $path_pos || $pos < $path_pos)) {
+                $path_pos = $pos;
+            }
+        }
+
+        if (false === $path_pos) {
+            return [$ssh, ''];
+        }
+
+        $target = rtrim(substr($ssh, 0, $path_pos), ':');
+        $path   = substr($ssh, $path_pos);
+
+        return [$target, $path];
     }
 
     /**

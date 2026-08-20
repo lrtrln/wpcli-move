@@ -272,10 +272,14 @@ class Commands extends \WP_CLI_Command
      * [--force]
      * : Overwrite an existing move.yml file.
      *
+     * [--wpcli-aliases]
+     * : Generate project WP-CLI aliases from .env and reference them in move.yml.
+     *
      * ## EXAMPLES
      *
      *     wp move init
      *     wp move init staging
+     *     wp move init staging --wpcli-aliases
      *
      * @subcommand init
      */
@@ -285,6 +289,9 @@ class Commands extends \WP_CLI_Command
         if (file_exists($config_file) && !isset($assoc_args['force'])) {
             \WP_CLI::error("❌ move.yml already exists. Use --force to overwrite it.");
         }
+
+        $use_wpcli_aliases  = isset($assoc_args['wpcli-aliases']);
+        $wp_cli_config_file = ABSPATH . 'wp-cli.yml';
 
         $env_file = Config::load_project_dotenv(ABSPATH);
         if (!$env_file) {
@@ -306,7 +313,11 @@ class Commands extends \WP_CLI_Command
             \WP_CLI::error("❌ Missing or empty .env variables for '$env': " . implode(', ', $missing));
         }
 
-        $content = $this->build_initial_config($env, $prefix);
+        if ($use_wpcli_aliases) {
+            $this->write_wp_cli_alias_config($wp_cli_config_file, $env, $prefix, isset($assoc_args['force']));
+        }
+
+        $content = $this->build_initial_config($env, $prefix, $use_wpcli_aliases);
 
         if (false === file_put_contents($config_file, $content)) {
             \WP_CLI::error("❌ Unable to write move.yml.");
@@ -331,10 +342,27 @@ class Commands extends \WP_CLI_Command
     /**
      * @param string $env
      * @param string $prefix
+     * @param bool $use_wpcli_aliases
      * @return string
      */
-    private function build_initial_config($env, $prefix)
+    private function build_initial_config($env, $prefix, $use_wpcli_aliases = false)
     {
+        if ($use_wpcli_aliases) {
+            return <<<YAML
+local: {}
+
+{$env}:
+  alias: "@{$env}"
+  not_push:
+    - uploads
+  exclude:
+    - ".git"
+    - ".DS_Store"
+    - "node_modules"
+
+YAML;
+        }
+
         return <<<YAML
 local: {}
 
@@ -350,6 +378,62 @@ local: {}
     - "node_modules"
 
 YAML;
+    }
+
+    /**
+     * @param string $env
+     * @param string $prefix
+     * @return string
+     */
+    private function build_initial_wp_cli_aliases_config($env, $prefix)
+    {
+        $vhost   = Config::env("{$prefix}_VHOST");
+        $wp_path = Config::env("{$prefix}_WP_PATH");
+        $ssh     = Config::env("{$prefix}_SSH");
+
+        return <<<YAML
+@{$env}:
+  ssh: {$this->yaml_quote($ssh)}
+  path: {$this->yaml_quote($wp_path)}
+  url: {$this->yaml_quote($vhost)}
+
+YAML;
+    }
+
+    /**
+     * @param string $wp_cli_config_file
+     * @param string $env
+     * @param string $prefix
+     * @param bool $force
+     */
+    private function write_wp_cli_alias_config($wp_cli_config_file, $env, $prefix, $force)
+    {
+        $alias = '@' . $env;
+        $content = file_exists($wp_cli_config_file) ? (string) file_get_contents($wp_cli_config_file) : '';
+
+        if ($content && preg_match('/^' . preg_quote($alias, '/') . ':/m', $content)) {
+            if (!$force) {
+                \WP_CLI::error("❌ WP-CLI alias '$alias' already exists in wp-cli.yml. Use --force to replace the file.");
+            }
+
+            $content = '';
+        }
+
+        $alias_content = $this->build_initial_wp_cli_aliases_config($env, $prefix);
+        $new_content   = rtrim($content) . ("\n" === substr($content, -1) || '' === $content ? '' : "\n") . ('' === $content ? "---\n" : "\n") . $alias_content;
+
+        if (false === file_put_contents($wp_cli_config_file, $new_content)) {
+            \WP_CLI::error("❌ Unable to write wp-cli.yml.");
+        }
+    }
+
+    /**
+     * @param string $value
+     * @return string
+     */
+    private function yaml_quote($value)
+    {
+        return '"' . str_replace(['\\', '"'], ['\\\\', '\"'], $value) . '"';
     }
 
     /**

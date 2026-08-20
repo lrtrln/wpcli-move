@@ -31,9 +31,10 @@ You can generate a starter file from your `.env` convention:
 ```bash
 wp move init
 wp move init staging
+wp move init staging --wpcli-aliases
 ```
 
-By default, this creates `move.yml` with `local: {}` and one remote environment. If no environment is provided, WP Move CLI uses the first complete remote environment found in `.env` (`STAGING_*`, then `PRODUCTION_*`). Before writing the file, it checks that the matching remote variables exist in `.env` (for example `STAGING_VHOST`, `STAGING_WP_PATH`, and `STAGING_SSH`). If `move.yml` already exists, use `--force` to overwrite it.
+By default, this creates `move.yml` with `local: {}` and one remote environment. If no environment is provided, WP Move CLI uses the first complete remote environment found in `.env` (`STAGING_*`, then `PRODUCTION_*`). Before writing the file, it checks that the matching remote variables exist in `.env` (for example `STAGING_VHOST`, `STAGING_WP_PATH`, and `STAGING_SSH`). If `move.yml` already exists, use `--force` to overwrite it. With `--wpcli-aliases`, WP Move CLI also creates or updates the project `wp-cli.yml` with a matching alias.
 
 ### Example `move.yml`
 
@@ -85,6 +86,79 @@ PRODUCTION_WP_PATH=/home/user/public_html
 PRODUCTION_SSH=user@your-server.com
 ```
 
+### WP-CLI aliases
+
+WP Move CLI can also read WP-CLI aliases already declared in `wp-cli.yml`, `wp-cli.local.yml`, or the global WP-CLI config.
+
+You can generate the project alias from `.env`:
+
+```bash
+wp move init staging --wpcli-aliases
+```
+
+With:
+
+```dotenv
+STAGING_VHOST=https://www.my-project.com
+STAGING_WP_PATH=/home/user/public_html
+STAGING_SSH=user@your-server.com
+```
+
+This creates or appends this alias in `wp-cli.yml`:
+
+```yaml
+@staging:
+  ssh: "user@your-server.com"
+  path: "/home/user/public_html"
+  url: "https://www.my-project.com"
+```
+
+And `move.yml` references it:
+
+```yaml
+local: {}
+
+staging:
+  alias: "@staging"
+  not_push:
+    - uploads
+  exclude:
+    - ".git"
+    - ".DS_Store"
+    - "node_modules"
+```
+
+Create an alias with WP-CLI:
+
+```bash
+wp cli alias add @staging --set-ssh=user@your-server.com --set-path=/home/user/public_html --set-url=https://www.my-project.com --config=project
+```
+
+Then use it directly:
+
+```bash
+wp move push @staging --uploads
+wp move pull @staging --db
+```
+
+When using a complete WP-CLI alias directly, `move.yml` is optional. Keep `move.yml` when you need WP Move CLI-specific options such as `exclude` or `not_push`.
+
+Or keep a named environment in `move.yml` and point it to the alias:
+
+```yaml
+local: {}
+
+staging:
+  alias: "@staging"
+  exclude:
+    - ".git"
+    - "node_modules"
+  not_push:
+    - uploads
+```
+
+WP Move CLI reads `ssh`, `path`, and `url` from the alias as `ssh`, `wp_path`, and `vhost`. Alias groups and HTTP aliases are not supported.
+
 ## Available Commands
 
 Path keys:
@@ -104,7 +178,7 @@ Tests the connection and configuration for a specific environment.
 Creates a database dump for a specific environment.
 
 ### `wp move init <environment>`
-Creates a starter `move.yml` file after validating the remote environment variables in `.env`. The local section is generated as `local: {}` so WP Move CLI can read `WP_HOME`, `WP_SITEURL`, `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` from `.env`.
+Creates a starter `move.yml` file after validating the remote environment variables in `.env`. The local section is generated as `local: {}` so WP Move CLI can read `WP_HOME`, `WP_SITEURL`, `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` from `.env`. Add `--wpcli-aliases` to also generate the matching project WP-CLI alias in `wp-cli.yml`.
 
 ### Common Options
 
