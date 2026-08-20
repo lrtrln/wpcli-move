@@ -26,22 +26,24 @@ Before using WP Move CLI, ensure the following are installed and accessible in y
 
 Create a `move.yml` file in the root directory of your WordPress installation (the same level as `wp-config.php`). This file defines your different environments.
 
+You can generate a starter file from your `.env` convention:
+
+```bash
+wp move init
+wp move init staging
+```
+
+By default, this creates `move.yml` with `local: {}` and one remote environment. If no environment is provided, WP Move CLI uses the first complete remote environment found in `.env` (`STAGING_*`, then `PRODUCTION_*`). Before writing the file, it checks that the matching remote variables exist in `.env` (for example `STAGING_VHOST`, `STAGING_WP_PATH`, and `STAGING_SSH`). If `move.yml` already exists, use `--force` to overwrite it.
+
 ### Example `move.yml`
 
 ```yaml
-local:
-  vhost: "http://my-project.local"
-  wp_path: "/var/www/my-project/wp"
-  db:
-    name: "my_project_local_db"
-    user: "root"
-    password: "password"
-    host: "localhost"
+local: {}
 
 production:
-  vhost: "https://www.my-project.com"
-  wordpress_path: "/home/user/public_html"
-  ssh: "user@your-server.com"
+  vhost: "${PRODUCTION_VHOST}"
+  wordpress_path: "${PRODUCTION_WP_PATH}"
+  ssh: "${PRODUCTION_SSH}"
   # Folders NOT allowed to be pushed to this environment.
   # By default, 'themes', 'plugins', and 'uploads' are pushable.
   not_push:
@@ -56,6 +58,31 @@ production:
   php_cli: "/usr/bin/php8.3-cli"
   # Skip wrappers that pin WP-CLI to an older PHP by executing the phar directly.
   wp_cli_path: "/usr/share/php/wp-cli/wp-cli-2.11.0.phar"
+```
+
+Values in `move.yml` can reference environment variables with `${VAR_NAME}`. WP Move CLI automatically loads a `.env` file placed next to `move.yml`, in its parent directory, or in the current working directory, without overriding variables already present in the shell environment.
+
+For `local`, WP Move CLI also understands common WordPress `.env` variables:
+
+- `WP_HOME` for `vhost`
+- `WP_SITEURL` as a fallback for `vhost`
+- `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` for `db`
+- `ABSPATH` for `wp_path`
+
+Example `.env`:
+
+```dotenv
+WP_ENVIRONMENT_TYPE=development
+WP_HOME=http://my-project.local
+WP_SITEURL=http://my-project.local
+DB_HOST=localhost
+DB_NAME=my_project_local_db
+DB_USER=root
+DB_PASSWORD=password
+
+PRODUCTION_VHOST=https://www.my-project.com
+PRODUCTION_WP_PATH=/home/user/public_html
+PRODUCTION_SSH=user@your-server.com
 ```
 
 ## Available Commands
@@ -76,13 +103,17 @@ Tests the connection and configuration for a specific environment.
 ### `wp move dump <environment>`
 Creates a database dump for a specific environment.
 
+### `wp move init <environment>`
+Creates a starter `move.yml` file after validating the remote environment variables in `.env`. The local section is generated as `local: {}` so WP Move CLI can read `WP_HOME`, `WP_SITEURL`, `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` from `.env`.
+
 ### Common Options
 
 - `--themes`: Sync the `wp-content/themes` directory.
 - `--plugins`: Sync the `wp-content/plugins` directory.
 - `--mu-plugins`: Sync the `wp-content/mu-plugins` directory.
 - `--uploads`: Sync the `wp-content/uploads` directory.
-- `--wp`: Sync native WordPress core files only (`wp-admin`, `wp-includes`, and root core files; `wp-config.php` is not included).
+- `--languages`: Sync the `wp-content/languages` directory.
+- `--wp`: Sync native WordPress files (`wp-admin`, `wp-includes`, root core files, and `wp-content/languages` when present; `wp-config.php` is not included). On push, it also creates the remote `wp-content` directory if needed.
 - `--db`: Sync the database.
 - `--all`: Sync the whole WordPress directory and the database. On push, this ignores `not_push` because it is meant to send everything; `exclude` still applies.
 - `--delete`: Deletes files on the destination that do not exist on the source. **Use with caution.**
@@ -105,6 +136,11 @@ wp move push production --db --uploads
 **Push native WordPress files to production**
 ```bash
 wp move push production --wp --force
+```
+
+**Push WordPress language files to production**
+```bash
+wp move push production --languages
 ```
 
 **Pull native WordPress files from staging**

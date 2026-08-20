@@ -70,6 +70,7 @@ class TaskRunner
         if ($sync_all_files) {
             $this->rsync('', $ssh, $conf['wp_path'], $conf['exclude'] ?? [], 'push', $use_delete);
         } elseif ($sync_wp) {
+            $this->ensure_remote_wp_content_dir($ssh, $conf['wp_path']);
             foreach ($this->get_local_wordpress_core_paths() as $path) {
                 $this->rsync($path, $ssh, $conf['wp_path'], $conf['exclude'] ?? [], 'push', $use_delete);
             }
@@ -534,6 +535,22 @@ class TaskRunner
     }
 
     /**
+     * Creates the remote wp-content directory required by WordPress core.
+     *
+     * @param string $ssh
+     * @param string $remote_wp_path
+     */
+    private function ensure_remote_wp_content_dir($ssh, $remote_wp_path)
+    {
+        $wp_content_dir = rtrim($remote_wp_path, '/') . '/wp-content';
+        $result         = $this->execute_remote_command($ssh, sprintf('mkdir -p %s', escapeshellarg($wp_content_dir)));
+
+        if ($result && 0 !== $result->return_code) {
+            \WP_CLI::error("❌ Failed to create remote wp-content directory.");
+        }
+    }
+
+    /**
      * Prevents pushing local core files over a newer remote WordPress installation.
      *
      * @param string|null $ssh
@@ -677,6 +694,10 @@ class TaskRunner
     private function get_local_wordpress_core_paths()
     {
         $paths = ['wp-admin', 'wp-includes'];
+        if (is_dir(rtrim(ABSPATH, '/') . '/wp-content/languages')) {
+            $paths[] = 'wp-content/languages';
+        }
+
         $files = [
             'index.php',
             'license.txt',
