@@ -2,6 +2,12 @@
 
 A simplified, modern, and PHP-native replacement for the Ruby tool `Wordmove`, designed to work as a WP-CLI command. This tool helps you synchronize your WordPress site's files and database between different environments (e.g., local, staging, production).
 
+## Critical Warning
+
+WP Move CLI can overwrite files, delete files with rsync, and replace entire WordPress databases. Use it only if you understand exactly which environment is the source and which environment is the destination.
+
+Before running any command against staging or production, make sure you have a recent backup of both files and database for every environment involved. `--dry-run` is strongly recommended before any first run, before `--delete`, before `--all`, and before any database sync.
+
 ## Prerequisites
  
 Before using WP Move CLI, ensure the following are installed and accessible in your system's `PATH` on both your local and remote machines:
@@ -192,6 +198,7 @@ Creates a starter `move.yml` file after validating the remote environment variab
 - `--all`: Sync the whole WordPress directory and the database. On push, this ignores `not_push` because it is meant to send everything; `exclude` still applies.
 - `--delete`: Deletes files on the destination that do not exist on the source. **Use with caution.**
 - `--force`: Allows `--wp` or `--all` to overwrite an existing WordPress installation. It does not allow overwriting a newer destination WordPress version.
+- `--yes`: Skip confirmation prompts for destructive operations.
 - `--dry-run`: Simulates the operation and shows what changes would be made.
 - `--purge`: (Used with `dump` command) Deletes all `.sql` files in the `wp-content/wpcli-move` directory.
 
@@ -248,6 +255,8 @@ wp move push production --all --dry-run
 ```
 
 When syncing with `--wp` or `--all`, WP Move CLI checks the destination WordPress installation first. If WordPress already exists on the destination, the sync is aborted unless `--force` is provided. If the destination installation is newer than the source, the sync is always aborted.
+
+Destructive operations ask for confirmation unless `--dry-run` or `--yes` is provided. This includes database imports, uploads sync, `--delete`, `--all`, and `--wp --force`.
 
 ## Compatibility
 

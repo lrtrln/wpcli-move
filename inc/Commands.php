@@ -23,6 +23,10 @@ class Commands extends \WP_CLI_Command
     /**
      * Push to a remote environment (files + DB).
      *
+     * This is a critical operation: it can overwrite remote files, delete remote files
+     * with --delete, and replace the remote database. Make a full backup first and
+     * verify the source and destination before running it.
+     *
      * ## OPTIONS
      *
      * [--themes]
@@ -54,6 +58,9 @@ class Commands extends \WP_CLI_Command
      *
      * [--force]
      * : Allows --wp or --all to overwrite an existing remote WordPress installation.
+     *
+     * [--yes]
+     * : Answer yes to the confirmation prompt for destructive operations.
      *
      * [--dry-run]
      * : Show the commands that would be run, without actually running them.
@@ -110,6 +117,8 @@ class Commands extends \WP_CLI_Command
             return;
         }
 
+        $this->confirm_destructive_operation('push', $env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync);
+
         \WP_CLI::log("Pushing to environment: $env" . ($this->executor->is_dry_run() ? ' (dry run)' : ''));
         $this->task_runner->run_push($env, $folders_to_sync, $sync_db, isset($assoc_args['delete']), $sync_wp, $sync_all_files, isset($assoc_args['force']));
 
@@ -122,6 +131,10 @@ class Commands extends \WP_CLI_Command
 
     /**
      * Pull from a remote environment (files + DB).
+     *
+     * This is a critical operation: it can overwrite local files, delete local files
+     * with --delete, and replace the local database. Make a full backup first and
+     * verify the source and destination before running it.
      *
      * ## OPTIONS
      *
@@ -154,6 +167,9 @@ class Commands extends \WP_CLI_Command
      *
      * [--force]
      * : Allows --wp or --all to overwrite an existing local WordPress installation.
+     *
+     * [--yes]
+     * : Answer yes to the confirmation prompt for destructive operations.
      *
      * [--dry-run]
      * : Show the commands that would be run, without actually running them.
@@ -200,6 +216,8 @@ class Commands extends \WP_CLI_Command
 
             return;
         }
+
+        $this->confirm_destructive_operation('pull', $env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync);
 
         \WP_CLI::log("Pulling from environment: $env" . ($this->executor->is_dry_run() ? ' (dry run)' : ''));
         $this->task_runner->run_pull($env, $folders_to_sync, $sync_db, isset($assoc_args['delete']), $sync_wp, $sync_all_files, isset($assoc_args['force']));
@@ -337,6 +355,57 @@ class Commands extends \WP_CLI_Command
         $this->config_handler = new Config($config_file);
         $this->executor       = new Executor($is_dry_run);
         $this->task_runner    = new TaskRunner($this->config_handler, $this->executor);
+    }
+
+    /**
+     * @param string $direction
+     * @param string $env
+     * @param array $assoc_args
+     * @param bool $sync_db
+     * @param bool $sync_wp
+     * @param bool $sync_all_files
+     * @param array $folders_to_sync
+     */
+    private function confirm_destructive_operation($direction, $env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync)
+    {
+        if ($this->executor->is_dry_run() || isset($assoc_args['yes'])) {
+            return;
+        }
+
+        $risks = [];
+
+        if ($sync_db) {
+            $risks[] = 'database import';
+        }
+
+        if (!empty($assoc_args['delete'])) {
+            $risks[] = 'rsync --delete';
+        }
+
+        if (in_array('wp-content/uploads', $folders_to_sync, true)) {
+            $risks[] = 'uploads overwrite';
+        }
+
+        if ($sync_all_files) {
+            $risks[] = 'whole WordPress directory sync';
+        } elseif ($sync_wp && !empty($assoc_args['force'])) {
+            $risks[] = 'WordPress core overwrite with --force';
+        }
+
+        if (!$risks) {
+            return;
+        }
+
+        \WP_CLI::warning("⚠️ Critical operation. Ensure files and database are backed up before continuing.");
+
+        $message = sprintf(
+            "Confirm %s to '%s' (%s)?",
+            $direction,
+            $env,
+            implode(', ', $risks)
+        );
+
+        \WP_CLI::confirm($message);
     }
 
     /**
