@@ -212,6 +212,24 @@ class TaskRunner
         \WP_CLI::success("✅ Dump directory for environment '$env' purged.");
     }
 
+    /**
+     * Opens the SSH master connection for an environment when it has an SSH target.
+     *
+     * @param string $env
+     */
+    public function warm_ssh_connection($env)
+    {
+        if ($this->executor->is_dry_run()) {
+            return;
+        }
+
+        $conf = $this->config->get_env_config($env);
+        $ssh  = $conf['ssh'] ?? null;
+        if ($ssh) {
+            $this->ensure_ssh_master_connection($ssh);
+        }
+    }
+
     // --- Méthodes de test ---
     // --- Test Methods ---
 
@@ -221,16 +239,28 @@ class TaskRunner
     private function test_ssh_connection($ssh)
     {
         \WP_CLI::log("1. Testing SSH connection: $ssh");
-        $command = "ssh {$this->executor->ssh_options} -o ConnectTimeout=5 {$ssh} 'echo 1'";
-        $result  = $this->executor->execute($command, true);
+        $this->ensure_ssh_master_connection($ssh);
+        \WP_CLI::success("✅ SSH connection successful.");
+    }
+
+    /**
+     * Opens the SSH ControlMaster connection early so following ssh/scp/rsync calls reuse it.
+     * A regular command keeps passphrase prompts attached to the current terminal.
+     *
+     * @param string $ssh
+     */
+    private function ensure_ssh_master_connection($ssh)
+    {
+        \WP_CLI::log("Opening SSH master connection: $ssh");
+        $command = "ssh {$this->executor->ssh_options} -o ConnectTimeout=5 " . escapeshellarg($ssh) . " true";
+        $result  = $this->executor->execute($command);
         if ($result && 0 !== $result->return_code) {
-            $error_message = "❌ Failed to connect via SSH to {$ssh}.";
+            $error_message = "❌ Failed to open SSH master connection to {$ssh}.";
             if (!empty($result->stderr)) {
-                $error_message .= "" . $result->stderr;
+                $error_message .= " " . trim($result->stderr);
             }
             \WP_CLI::error($error_message);
         }
-        \WP_CLI::success("✅ SSH connection successful.");
     }
 
     /**
@@ -241,6 +271,30 @@ class TaskRunner
     {
         $step = $is_remote ? '2' : '1';
         \WP_CLI::log("$step. Testing URL (vhost): $vhost");
+
+        $curl_result = $this->executor->execute("curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 " . escapeshellarg($vhost), true);
+
+        if ($curl_result && 0 === $curl_result->return_code) {
+            $http_code = (int) trim($curl_result->stdout);
+            if ($http_code >= 200 && $http_code < 300) {
+                \WP_CLI::success("✅ URL is accessible (Code: $http_code).");
+
+                return;
+            }
+
+            \WP_CLI::error("❌ URL returned an error code: $http_code.");
+        }
+
+        if ($curl_result && 127 !== $curl_result->return_code) {
+            $error_message = "❌ Failed to connect to $vhost with curl.";
+            if (!empty($curl_result->stderr)) {
+                $error_message .= " " . trim($curl_result->stderr);
+            }
+            \WP_CLI::error($error_message);
+        }
+
+        \WP_CLI::warning("⚠️ curl is not available. Falling back to the WordPress HTTP API.");
+
         $response = wp_remote_get($vhost);
         if (is_wp_error($response)) {
             \WP_CLI::error("❌ Failed to connect to $vhost. Error: " . $response->get_error_message());
@@ -782,16 +836,22 @@ class TaskRunner
     {
         if (!empty($env_conf['wp_cli_path'])) {
             $php_cli = $env_conf['php_cli'] ?? 'php';
+            $wp_cli_path = trim($env_conf['wp_cli_path']);
 
-            return sprintf(
-                "%s %s",
-                escapeshellarg($php_cli),
-                escapeshellarg($env_conf['wp_cli_path'])
-            );
+            $result = $this->execute_remote_command($ssh, '[ -f ' . escapeshellarg($wp_cli_path) . ' ]', true);
+            if ($result && 0 === $result->return_code) {
+                return sprintf(
+                    "%s %s",
+                    escapeshellarg($php_cli),
+                    escapeshellarg($wp_cli_path)
+                );
+            }
+
+            \WP_CLI::warning("⚠️ Remote WP-CLI path '{$wp_cli_path}' was not found. Falling back to automatic detection.");
         }
 
-        $wp_path = $this->get_remote_wp_path($ssh);
         $php_cli = $env_conf['php_cli'] ?? '';
+        $wp_path = $this->get_remote_wp_path($ssh, (bool) $php_cli);
 
         if ($php_cli) {
             return sprintf("%s %s", escapeshellarg($php_cli), escapeshellarg($wp_path));
@@ -804,24 +864,30 @@ class TaskRunner
      * Determines the path to the remote WP-CLI binary and caches the result.
      *
      * @param string $ssh
+     * @param bool $prefer_phar
      * @return string
      */
-    private function get_remote_wp_path($ssh)
+    private function get_remote_wp_path($ssh, $prefer_phar = false)
     {
         if (!$ssh) {
             \WP_CLI::error("❌ SSH target is required to run remote WP-CLI commands.");
         }
 
-        if (isset($this->remote_wp_paths[$ssh])) {
-            return $this->remote_wp_paths[$ssh];
+        $cache_key = $ssh . ($prefer_phar ? '|phar' : '|binary');
+        if (isset($this->remote_wp_paths[$cache_key])) {
+            return $this->remote_wp_paths[$cache_key];
         }
 
-        $result = $this->execute_remote_command($ssh, 'command -v wp || command -v wpcli || command -v wp-cli', true);
+        $lookup_command = $prefer_phar
+            ? 'for file in /usr/share/php/wp-cli/wp-cli.phar /usr/share/php/wp-cli/wp-cli-*.phar /usr/local/bin/wp-cli.phar /usr/bin/wp-cli.phar; do [ -f "$file" ] && { printf "%s\n" "$file"; exit 0; }; done; command -v wp || command -v wpcli || command -v wp-cli'
+            : 'command -v wp || command -v wpcli || command -v wp-cli';
+
+        $result = $this->execute_remote_command($ssh, $lookup_command, true);
         if (!$result || 0 !== $result->return_code || '' === trim($result->stdout)) {
             \WP_CLI::error("❌ Unable to locate WP-CLI on remote host '{$ssh}'. Please ensure `wp`, `wpcli`, or `wp-cli` is installed and in PATH.");
         }
 
-        return $this->remote_wp_paths[$ssh] = trim($result->stdout);
+        return $this->remote_wp_paths[$cache_key] = trim($result->stdout);
     }
 
     /**

@@ -21,9 +21,9 @@ class Executor
     {
         $this->is_dry_run = $is_dry_run;
 
-        // Defines a unique SSH control socket for this command execution.
-        $socket_path       = "/tmp/wp-move-ssh-" . getmypid();
-        $this->ssh_options = "-o ControlMaster=auto -o ControlPath={$socket_path} -o ControlPersist=60s";
+        // Reuses the same SSH master connection across separate wp move commands.
+        $socket_path       = "/tmp/wp-move-ssh-%C";
+        $this->ssh_options = "-o ControlMaster=auto -o ControlPath={$socket_path} -o ControlPersist=10m";
     }
 
     /**

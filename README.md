@@ -17,6 +17,7 @@ Before using WP Move CLI, ensure the following are installed and accessible in y
 - **Composer**: For installing PHP dependencies.
 - **rsync**: For efficient file synchronization.
 - **SSH Client**: For secure remote connections. Password-less login via SSH keys is highly recommended.
+- **curl**: Recommended for URL checks in `wp move test`.
 - **MySQL Client**: The `mysql` command-line client.
 - **MySQL Dump Utility**: `mysqldump` or `mariadb-dump`.
 
@@ -63,8 +64,8 @@ production:
   # Require a specific PHP binary for WP-CLI commands on this host.
   # Useful when the default CLI PHP version is older than 8.2 (common on shared hosts like IONOS).
   php_cli: "/usr/bin/php8.3-cli"
-  # Skip wrappers that pin WP-CLI to an older PHP by executing the phar directly.
-  wp_cli_path: "/usr/share/php/wp-cli/wp-cli-2.11.0.phar"
+  # Optional: force a specific WP-CLI phar only if automatic remote detection is not enough.
+  # wp_cli_path: "/path/to/wp-cli.phar"
 ```
 
 Values in `move.yml` can reference environment variables with `${VAR_NAME}`. WP Move CLI automatically loads a `.env` file placed next to `move.yml`, in its parent directory, or in the current working directory, without overriding variables already present in the shell environment.
@@ -205,7 +206,7 @@ Creates a starter `move.yml` file after validating the remote environment variab
 ### PHP / WP-CLI overrides
 
 - `php_cli`: Path to the PHP binary that should run WP-CLI on remote hosts. If the shared host ships an older default PHP, point this at a higher version (e.g., `/usr/bin/php8.3`).
-- `wp_cli_path`: When `/usr/bin/wp` is a wrapper pinned to an outdated PHP (like on IONOS), point this to the actual WP-CLI phar (for example `/usr/share/php/wp-cli/wp-cli-2.11.0.phar`) so the command is executed via `php_cli` instead of the wrapper.
+- `wp_cli_path`: Optional fallback to force a specific remote WP-CLI phar. When omitted, WP Move CLI detects WP-CLI remotely and, when `php_cli` is set, prefers common phar locations before falling back to `wp`, `wpcli`, or `wp-cli` in `PATH`.
 
 ## Usage Examples
 

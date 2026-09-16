@@ -117,6 +117,7 @@ class Commands extends \WP_CLI_Command
             return;
         }
 
+        $this->warm_ssh_before_confirmation($env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync);
         $this->confirm_destructive_operation('push', $env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync);
 
         \WP_CLI::log("Pushing to environment: $env" . ($this->executor->is_dry_run() ? ' (dry run)' : ''));
@@ -217,6 +218,7 @@ class Commands extends \WP_CLI_Command
             return;
         }
 
+        $this->warm_ssh_before_confirmation($env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync);
         $this->confirm_destructive_operation('pull', $env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync);
 
         \WP_CLI::log("Pulling from environment: $env" . ($this->executor->is_dry_run() ? ' (dry run)' : ''));
@@ -406,6 +408,29 @@ class Commands extends \WP_CLI_Command
         );
 
         \WP_CLI::confirm($message);
+    }
+
+    /**
+     * Opens SSH before prompting so passphrase prompts do not appear after confirmation.
+     *
+     * @param string $env
+     * @param array $assoc_args
+     * @param bool $sync_db
+     * @param bool $sync_wp
+     * @param bool $sync_all_files
+     * @param array $folders_to_sync
+     */
+    private function warm_ssh_before_confirmation($env, $assoc_args, $sync_db, $sync_wp, $sync_all_files, $folders_to_sync)
+    {
+        if ($this->executor->is_dry_run()) {
+            return;
+        }
+
+        if (!$sync_db && !$sync_wp && !$sync_all_files && empty($folders_to_sync)) {
+            return;
+        }
+
+        $this->task_runner->warm_ssh_connection($env);
     }
 
     /**
